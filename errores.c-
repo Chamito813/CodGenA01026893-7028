@@ -1,0 +1,21 @@
+/* Inicio de prueba de errores en C- */
+
+int main(){ 
+    int a
+    int b;
+    
+    a = 5
+    b = 3;
+    
+    if (a < b {
+        a = a + b;
+    } else {
+        a = a - b;
+    }
+
+    while (a != 0 {
+        a = a / 2;
+    }
+
+    return a
+}
