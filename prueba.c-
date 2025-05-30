@@ -1,17 +1,9 @@
-/* prueba_array.c- */
-void main(void) {
-  int a[5];
-  int i;
-  /* Llenar el arreglo con dobles de i */
-  i = 0;
-  while (i < 5) {
-    a[i] = i * 2;
-    i = i + 1;
-  }
-  /* Imprimir los valores del arreglo */
-  i = 0;
-  while (i < 5) {
-    output(a[i]);
-    i = i + 1;
-  }
+int incr(int x) {
+  return x + 1;
+}
+
+int main() {
+  int r;
+  r = incr(5);
+  output(r);    /* suponiendo que tu runtime traduce output() a print_int + syscall */
 }
