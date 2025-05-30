@@ -1,7 +1,9 @@
 from globalTypes import *
 
 output = []
-declared_vars = set()
+# Lista ordenada de variables globales, para asignar offsets
+declared_vars = []
+var_offsets = {}
 label_counter = 0
 temp_counter = 0
 
@@ -16,41 +18,43 @@ def emit_label(label):
 
 def new_label(prefix="L"):
     global label_counter
-    label = f"{prefix}{label_counter}"
+    lab = f"{prefix}{label_counter}"
     label_counter += 1
-    return label
-
-def generate_once_and_store(node):
-    generate_code(node)
-    temp_reg = new_temp()
-    emit(f"move {temp_reg}, $t0", f"Guardar resultado temporal en {temp_reg}")
-    emit("subu $sp, $sp, 4", "Reservar espacio en pila")
-    emit(f"sw {temp_reg}, 0($sp)", f"Push argumento desde {temp_reg}")
-    return temp_reg
+    return lab
 
 def new_temp():
     global temp_counter
-    reg = f"$t{(temp_counter % 10)}"  # Puedes mejorar esto luego si usas más temporales
+    r = f"$t{temp_counter % 10}"
     temp_counter += 1
-    return reg
+    return r
 
 def handle_stmt(node):
     if node.stmt == StmtKind.FunDeclK:
         emit_label(node.name)
+        if node.name == "main":
+            emit("la $gp, global_data", "Inicializar $gp a global_data")
         generate_code(node.child[1])
+
     elif node.stmt == StmtKind.VarDeclK:
-        declared_vars.add(node.name)
+        if node.name not in var_offsets:
+            offset = len(declared_vars) * 4
+            declared_vars.append(node.name)
+            var_offsets[node.name] = offset
+
     elif node.stmt == StmtKind.AssignK:
         generate_code(node.child[0])
-        emit(f"sw $t0, {node.name}($gp)", f"Asignar a {node.name}")
+        off = var_offsets[node.name]
+        emit(f"sw $t0, {off}($gp)", f"Asignar a {node.name}")
+
     elif node.stmt == StmtKind.CompoundK:
-        for child in node.child:
-            if child:
-                generate_code(child)
+        for c in node.child:
+            if c:
+                generate_code(c)
+
     elif node.stmt == StmtKind.IfK:
         generate_code(node.child[0])
         else_lbl = new_label("else")
-        end_lbl = new_label("endif")
+        end_lbl  = new_label("endif")
         emit(f"beq $t0, $zero, {else_lbl}", "Saltar si condición es falsa")
         generate_code(node.child[1])
         emit(f"j {end_lbl}", "Saltar al final del if")
@@ -58,40 +62,65 @@ def handle_stmt(node):
         if node.child[2]:
             generate_code(node.child[2])
         emit_label(end_lbl)
+
+    elif node.stmt == StmtKind.WhileK:
+        start_lbl = new_label("while")
+        end_lbl   = new_label("endwhile")
+        emit_label(start_lbl)
+        generate_code(node.child[0])  # condición
+        emit(f"beq $t0, $zero, {end_lbl}", "Salir while si condición es falsa")
+        generate_code(node.child[1])  # cuerpo
+        emit(f"j {start_lbl}", "Volver al inicio del while")
+        emit_label(end_lbl)
+
     elif node.stmt == StmtKind.ReturnK:
         generate_code(node.child[0])
         emit("move $v0, $t0", "Retornar valor")
         emit("jr $ra", "Regresar de función")
 
 def handle_expr(node):
+    # constantes
     if node.exp == ExpKind.ConstK:
         emit(f"li $t0, {node.val}", f"Cargar constante {node.val}")
+
+    # variables globales
     elif node.exp == ExpKind.IdK:
-        emit(f"lw $t0, {node.name}($gp)", f"Cargar variable {node.name}")
+        off = var_offsets[node.name]
+        emit(f"lw $t0, {off}($gp)", f"Cargar variable {node.name}")
+
+    # llamadas
     elif node.exp == ExpKind.CallK:
         if node.name == "input":
             emit("li $v0, 5", "Leer entero")
             emit("syscall")
             emit("move $t0, $v0", "Guardar resultado de input")
         elif node.name == "output":
-            generate_code(node.child[0])
-            emit("move $a0, $t0", "Pasar argumento a $a0")
-            emit("li $v0, 1", "Código de imprimir")
+            if node.child[0]:
+                generate_code(node.child[0])
+                emit("move $a0, $t0", "Pasar argumento a $a0")
+            else:
+                emit("li $a0, 0", "Output sin args → pasar 0")
+            emit("li $v0, 1", "Imprimir entero")
             emit("syscall")
         else:
+            # argumentos en pila
             args = []
-            arg = node.child[0]
-            while arg:
-                temp = generate_once_and_store(arg)
-                args.append(temp)  # Lo guardas por si se quiere reutilizar
-                arg = arg.sibling
-            emit(f"jal {node.name}", f"Llamar función {node.name}")
-            emit("move $t0, $v0", "Resultado a $t0")
+            c = node.child[0]
+            while c:
+                generate_code(c)
+                emit("subu $sp, $sp, 4", "Reservar espacio")
+                emit("sw $t0, 0($sp)", "Push arg")
+                args.append(c)
+                c = c.sibling
+            emit(f"jal {node.name}", f"Llamar {node.name}")
+            emit("move $t0, $v0", "Resultado")
             if args:
-                emit(f"addu $sp, $sp, {len(args)*4}", "Limpiar pila")
+                emit(f"addu $sp, $sp, {4*len(args)}", "Limpiar pila")
+
+    # operaciones binarias
     elif node.exp == ExpKind.OpK:
         generate_code(node.child[0])
-        emit("move $t1, $t0", "Guardar operando izquierdo")
+        emit("move $t1, $t0", "Guardar izq")
         generate_code(node.child[1])
         op = node.op
         if op == TokenType.PLUS:
@@ -101,8 +130,8 @@ def handle_expr(node):
         elif op == TokenType.TIMES:
             emit("mul $t0, $t1, $t0", "Multiplicación")
         elif op == TokenType.OVER:
-            emit("div $t1, $t0", "Dividir t1 entre t0")
-            emit("mflo $t0", "Guardar cociente en $t0")
+            emit("div $t1, $t0", "Dividir")
+            emit("mflo $t0", "Guardar cociente")
         elif op == TokenType.EE:
             emit("seq $t0, $t1, $t0", "Igualdad")
         elif op == TokenType.NE:
@@ -110,30 +139,30 @@ def handle_expr(node):
         elif op == TokenType.LT:
             emit("slt $t0, $t1, $t0", "Menor que")
         elif op == TokenType.LE:
-            emit("sle $t0, $t1, $t0", "Menor o igual")
+            emit("sle $t0, $t1, $t0", "≤")
         elif op == TokenType.GT:
             emit("sgt $t0, $t1, $t0", "Mayor que")
         elif op == TokenType.GE:
-            emit("sge $t0, $t1, $t0", "Mayor o igual")
+            emit("sge $t0, $t1, $t0", "≥")
 
 def generate_code(node):
     while node:
         if node.nodekind == NodeKind.StmtK:
             handle_stmt(node)
-        elif node.nodekind == NodeKind.ExpK:
+        else:
             handle_expr(node)
         node = node.sibling
 
 def write_output_to_file(filename="output.s"):
     with open(filename, "w") as f:
+        # sección de datos
         f.write(".data\n")
+        f.write("global_data:\n")
         for var in declared_vars:
-            f.write(f"{var}: .word 0\n")
+            f.write(f"  {var}: .word 0\n")
+        # sección de código
         f.write("\n.text\n")
         for line in output:
             f.write(line + "\n")
-        f.write("\tli $v0, 10\n\tsyscall\n")
-
-# Ejemplo de uso (ya con un AST listo):
-# generate_code(ast_root)
-# write_output_to_file("programa.s")
+        f.write("\tli $v0, 10\t# exit\n")
+        f.write("\tsyscall\n")
