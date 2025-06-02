@@ -1,9 +1,27 @@
-int incr(int x) {
+/*int incr(int x) {
   return x + 1;
-}
+}*/
 
-int main() {
+void main(void) {
   int r;
-  r = incr(5);
+  r = 10;
+
+  int i;
+  i = 0;
+
+  while (i < 10) {
+    i = i + 1;
+    if (i < 5) {
+      r = r + 25;
+    }
+    else {
+        if (i == 5) {
+          r = r - 35;
+        }
+        else {
+            r = r - 1;
+        }
+    }
+  }
   output(r);    /* suponiendo que tu runtime traduce output() a print_int + syscall */
 }
