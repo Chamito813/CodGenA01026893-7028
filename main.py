@@ -4,7 +4,7 @@ from Parser import *
 from analyze import *
 from cgen import *
 
-fileName = "prueba"
+fileName = "prueba2"
 f = open(fileName + '.c-', 'r')
 program = f.read() 		# lee todo el archivo a compilar
 f.close()                       # cerrar el archivo con programa fuente

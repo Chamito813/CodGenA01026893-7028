@@ -13,14 +13,12 @@
 #   - operadores aritméticos y comparaciones
 #
 # IMPORTANTE:
-#   • Sólo en `recorrerNumeros` movemos $a0 → $s0, para guardar el “n” de
-#     forma que no se pierda tras las llamadas a imprimirPar/imprimirImpar.
-#   • En `imprimirPar` e `imprimirImpar` **no** tocamos $s0.  
-#   • Cuando en `recorrerNumeros` necesitemos comparar “i <= n”, leemos `n` de $s0.
+#   • En la función `recorrerNumeros`, salvamos/restauramos $ra en $s1 para
+#     no perder la dirección de retorno a main cuando hacemos jal imprimirPar/imprimirImpar.
 #
-# Para usarlo con Parser.py / analyze.py:
-#   1) main.py lee “prueba.c-”, genera el AST y hace `generate_code(syntaxTree)`.
-#   2) Después `write_output_to_file("prueba.s")` vuelca todo el MIPS.
+# Para usarlo junto con Parser.py y analyze.py:
+#   1) main.py lee "prueba.c-", genera el AST y hace generate_code(syntaxTree).
+#   2) Luego write_output_to_file("prueba.s") vuelca todo el MIPS.
 
 from globalTypes import *
 
@@ -33,7 +31,6 @@ label_counter = 0       # Contador para etiquetas únicas (“while0”, “else
 
 current_function = None # Nombre de la función actual
 current_params = []     # Listado de parámetros de la función actual
-
 
 # ----------------------------------------
 # Auxiliares para emitir instrucciones
@@ -59,43 +56,17 @@ def new_label(prefix="L"):
     label_counter += 1
     return lbl
 
-
 # ----------------------------------------
 # generate_code: recorre el AST y llena `output`
 # ----------------------------------------
 def generate_code(node):
-    """
-    Recorre recursivamente el AST `node` (tipo TreeNode) e imprime
-    instrucciones MIPS en la lista `output`.
-
-    • FunDeclK: etiqueta + prolog/epílogo + cuerpo.  
-      – Sólo si `node.name == "recorrerNumeros"`, movemos $a0→$s0 en el prolog.  
-    • VarDeclK: registra la variable en `declared_vars` (se definirá en .data).  
-    • AssignK: “x = expr;” → evalúa expr ($t0) y sw $t0,0(x).  
-    • IfK: etiqueta elseX/endifX.  
-    • WhileK: etiqueta whileX/endwhileX, y en la comparación siempre leemos “n” de $s0.  
-    • ReturnK: evalúa expr→$t0, mueve $v0,$t0, y si no es main hace jr $ra.  
-    • ConstK: li $t0, valor.  
-    • IdK:  
-      – Si es parámetro 0 y estamos dentro de `recorrerNumeros`, leemos `$t0 ← $s0`.  
-      – Si es parámetro 0 en cualquier otra función, leemos `$t0 ← $a0` (pues no tenemos jal internos).  
-      – Sino, variable global: la var → $t1; lw $t0,0($t1).  
-    • CallK:  
-      – Si `func == "output"`, evalúa arg→$t0, luego print_int + print_string "\n",  
-        y deja `$t0 = 0` (por consistencia).  
-      – Si es otra función, evalúa arg→$t0, `move $a0,$t0`, `jal func`, y luego `move $t0,$v0`.  
-    • OpK: evalúa recursivamente `child[0]→$t0` y guarda en `$t1`; luego `child[1]→$t0`;  
-      aplica add/sub/mul/div o slt/sle/sgt/sge/seq/sne según `node.op`.  
-
-    Al terminar con un nodo, avanza a `node.sibling`.
-    """
     global current_function, current_params
 
     while node:
-        # — Sentencias — #
+        # ——— Sentencias ——— #
         if node.nodekind == NodeKind.StmtK:
 
-            # 1) Declaración de función
+            # 1) Declaración de función (FunDeclK)
             if node.stmt == StmtKind.FunDeclK:
                 func_name = node.name
 
@@ -114,31 +85,37 @@ def generate_code(node):
                     current_params.append(param_node.name)
                     param_node = param_node.sibling
 
-                # — Prolog —  
-                # Si la función se llama EXACTAMENTE “recorrerNumeros” y tiene
-                # parámetro “n”, guardamos “n” en $s0 para no perderlo tras llamadas.
+                # — Prolog especial de `recorrerNumeros`: —
+                #    • Guardamos 'n' (parámetro 0 en $a0) en $s0.
+                #    • Además, salvamos $ra en $s1 para no perder retornar a main.
                 if func_name == "recorrerNumeros" and len(current_params) >= 1:
                     emit("move $s0, $a0", "guardar n ($a0) → $s0 en recNum")
+                    emit("move $s1, $ra", "salvar $ra original → $s1 (para volver a main)")
 
-                # (1.d) Generar cuerpo de la función
+                # (1.d) Generar el cuerpo de la función
                 generate_code(node.child[1])
 
-                # (1.e) Epílogo: si no es main, retornar
-                if func_name != "main":
+                # (1.e) Epílogo:
+                #    • Si es `recorrerNumeros`, restauramos $ra desde $s1 antes de retornar.
+                #    • Si NO es main, hacemos jr $ra.
+                if func_name == "recorrerNumeros":
+                    emit("move $ra, $s1", "restaurar $ra desde $s1 para volver a main")
+                    emit("jr $ra", "retornar de recorrerNumeros")
+                elif func_name != "main":
                     emit("jr $ra", f"retornar de {func_name}")
 
-                # (1.f) Restaurar contexto
+                # (1.f) Restaurar contexto previo
                 current_function = saved_function
                 current_params = saved_params
 
-            # 2) Declaración de variable global
+            # 2) Declaración de variable global (VarDeclK)
             elif node.stmt == StmtKind.VarDeclK:
                 declared_vars.add(node.name)
 
             # 3) Asignación: x = expr;
             elif node.stmt == StmtKind.AssignK:
                 declared_vars.add(node.name)
-                # Evaluar expr → $t0
+                # Evaluar la expresión → $t0
                 generate_code(node.child[0])
                 # Guardar $t0 en la variable global x
                 emit(f"la $t1, {node.name}", f"cargar dirección de {node.name}")
@@ -155,9 +132,9 @@ def generate_code(node):
                 else_lbl = new_label("else")
                 end_lbl  = new_label("endif")
 
-                # (5.a) Evaluar cond → $t0
+                # (5.a) Evaluar condición → $t0
                 generate_code(node.child[0])
-                # (5.b) Si cond == 0, saltar a else_lbl
+                # (5.b) Si $t0 == 0, saltar a else_lbl
                 emit(f"beq $t0, $zero, {else_lbl}", "condición falsa → else")
 
                 # (5.c) Rama THEN
@@ -169,7 +146,6 @@ def generate_code(node):
                 emit_label(else_lbl)
                 if node.child[2]:
                     generate_code(node.child[2])
-
                 # (5.f) Fin del IF
                 emit_label(end_lbl)
 
@@ -181,15 +157,15 @@ def generate_code(node):
                 # (6.a) Etiqueta inicio
                 emit_label(start_lbl)
 
-                # (6.b) Evaluar cond → $t0
-                #      Si la condición involucra “n” (parámetro 0), lo lee de $s0.
+                # (6.b) Evaluar condición → $t0
+                #       Si la condición involucra “n” (parámetro 0), se lee de $s0.
                 generate_code(node.child[0])
-                # (6.c) Si cond == 0 → saltar a end_lbl
+                # (6.c) Si $t0 == 0, saltar a end_lbl
                 emit(f"beq $t0, $zero, {end_lbl}", "condición falsa → fin while")
 
                 # (6.d) Cuerpo del while
                 generate_code(node.child[1])
-                # (6.e) Volver a inicio
+                # (6.e) Volver a inicio (para re-evaluar cond)
                 emit(f"j {start_lbl}", "volver a condición")
 
                 # (6.f) Etiqueta fin while
@@ -200,7 +176,7 @@ def generate_code(node):
                 if node.child[0]:
                     # Evaluar expr → $t0
                     generate_code(node.child[0])
-                    # Mover $t0 → $v0
+                    # Mover $t0 → $v0 (valor de retorno)
                     emit("move $v0, $t0", "valor de retorno en $v0")
                 # Si no es main, retornar con jr $ra
                 if current_function != "main":
@@ -209,21 +185,21 @@ def generate_code(node):
         # — Expresiones — #
         elif node.nodekind == NodeKind.ExpK:
 
-            # 1) Constante entera
+            # 1) Constante entera (ConstK)
             if node.exp == ExpKind.ConstK:
                 emit(f"li $t0, {node.val}", f"const {node.val}")
 
-            # 2) Identificador
+            # 2) Identificador (IdK)
             elif node.exp == ExpKind.IdK:
                 name = node.name
-                # Si estamos en “recorrerNumeros” y es el parámetro 0, cargar desde $s0
+                # Si estamos en `recorrerNumeros` y es parámetro 0, leemos `$t0 ← $s0`
                 if current_function == "recorrerNumeros" and name in current_params:
                     idx = current_params.index(name)
                     if idx == 0:
                         emit("move $t0, $s0", f"param '{name}' (en $s0) → $t0")
                     else:
                         raise Exception("Sólo se espera 1 parámetro en recorrerNumeros.")
-                # Si es parámetro 0 de otra función, viene en $a0 y no hay jal interno
+                # Si es parámetro 0 de otra función, lo leemos de `$a0`
                 elif current_function and name in current_params:
                     idx = current_params.index(name)
                     if idx == 0:
@@ -246,7 +222,7 @@ def generate_code(node):
                     if node.child[0]:
                         generate_code(node.child[0])
                     else:
-                        # Si llamaron output() sin args:
+                        # Si llamaron a output() sin argumentos:
                         emit("li $t0, 0", "output sin args → 0")
 
                     # (b) print_int
@@ -266,9 +242,9 @@ def generate_code(node):
                     # Llamada normal a función (apenas 1 arg, por simplicidad)
                     if node.child[0]:
                         generate_code(node.child[0])
-                        emit("move $a0, $t0", "pasar arg a $a0")
+                        emit("move $a0, $t0", "pasar argumento a $a0")
                     emit(f"jal {func}", f"llamar {func}")
-                    # Tras retornar, $v0 lleva el resultado
+                    # Tras el jal, $v0 lleva el resultado
                     emit("move $t0, $v0", f"resultado de {func} → $t0")
 
             # 4) Operación binaria (OpK)
@@ -289,7 +265,7 @@ def generate_code(node):
                 elif op == TokenType.OVER:
                     emit("div $t1, $t0", "división entera")
                     emit("mflo $t0",    "parte entera → $t0")
-                # Comparaciones
+                # Comparaciones:
                 elif op == TokenType.LT:
                     emit("slt $t0, $t1, $t0", "menor que")
                 elif op == TokenType.LE:
@@ -306,9 +282,8 @@ def generate_code(node):
         # Avanzar al siguiente hermano
         node = node.sibling
 
-
 # ----------------------------------------
-# write_output_to_file: vuelca el MIPS final a un archivo .s
+# write_output_to_file: vuelca el MIPS en un .s
 # ----------------------------------------
 def write_output_to_file(fn="output.s"):
     """
@@ -334,10 +309,10 @@ def write_output_to_file(fn="output.s"):
         f.write("j main\n")
         f.write(".globl main\n\n")
 
-        # Escribir cada línea generada en `output`
+        # Escribimos cada instrucción acumulada en `output`
         for ln in output:
             f.write(ln + "\n")
 
-        # Syscall exit por defecto
+        # Syscall exit por defecto (en caso de que main no haga return)
         f.write("\tli $v0, 10\t# exit por defecto\n")
         f.write("\tsyscall\n")
